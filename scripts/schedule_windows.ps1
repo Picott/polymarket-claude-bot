@@ -10,10 +10,9 @@ $TaskName    = "PolymarketClaudeBot"
 
 $Action = New-ScheduledTaskAction `
     -Execute $PythonExe `
-    -Argument "$BotScript --mode paper --once >> `"$LogFile`" 2>&1" `
+    -Argument ("$BotScript --mode paper --once >> " + $LogFile + " 2>&1") `
     -WorkingDirectory $ProjectPath
 
-# Corre a las 6am, 12pm, 6pm, 12am
 $Triggers = @(
     $(New-ScheduledTaskTrigger -Daily -At "06:00"),
     $(New-ScheduledTaskTrigger -Daily -At "12:00"),
@@ -31,13 +30,13 @@ Register-ScheduledTask `
     -Action $Action `
     -Trigger $Triggers `
     -Settings $Settings `
-    -Description "Polymarket Claude Bot — paper trading, 4x daily" `
+    -Description "Polymarket Claude Bot - paper trading, 4x daily" `
     -Force
 
 Write-Host ""
-Write-Host "  [OK] Task '$TaskName' registrada en Task Scheduler"
-Write-Host "  Corre a las: 06:00, 12:00, 18:00, 00:00"
-Write-Host "  Logs en: $LogFile"
+Write-Host ("[OK] Task registrada: " + $TaskName)
+Write-Host "Corre a las: 06:00, 12:00, 18:00, 00:00"
+Write-Host ("Logs en: " + $LogFile)
 Write-Host ""
-Write-Host "  Para ver la tarea: taskschd.msc"
-Write-Host ('  Para eliminarla:   Unregister-ScheduledTask -TaskName ' + $TaskName)
+Write-Host "Para ver la tarea: taskschd.msc"
+Write-Host ("Para eliminarla: Unregister-ScheduledTask -TaskName " + $TaskName)

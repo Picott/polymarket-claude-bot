@@ -292,6 +292,26 @@ def run_once(mode: str):
         print()
 
     print(f"  Done. {open_positions} positions · ${daily_deployed:.2f} deployed today\n")
+    _push_trades()
+
+
+def _push_trades():
+    """Auto-commit and push trades.jsonl so Vercel dashboard updates."""
+    import subprocess
+    try:
+        base = str(ROOT)
+        subprocess.run(["git", "add", "logs/trades.jsonl"], cwd=base, check=True, capture_output=True)
+        result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=base, capture_output=True)
+        if result.returncode == 0:
+            return  # nothing new to commit
+        subprocess.run(
+            ["git", "commit", "-m", f"auto: update trades {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"],
+            cwd=base, check=True, capture_output=True
+        )
+        subprocess.run(["git", "push", "origin", "master"], cwd=base, check=True, capture_output=True)
+        print("  [✓] Dashboard updated on Vercel\n")
+    except Exception as e:
+        print(f"  [!] Auto-push failed (run manually): {e}\n")
 
 
 # ── Entry point ──────────────────────────────────────────────────

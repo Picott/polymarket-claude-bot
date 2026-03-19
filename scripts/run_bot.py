@@ -144,7 +144,6 @@ def evaluate_market(question: str, market_prob: float, model: str) -> dict | Non
         if not raw.strip():
             print(f"    [!] Claude empty response ({model}) | stop_reason={msg.stop_reason}")
             return None
-        print(f"    [DEBUG] raw={raw[:120]!r}")
         return _parse_json_response(raw)
     except json.JSONDecodeError as e:
         print(f"    [!] Claude JSON parse error ({model}): {e}")

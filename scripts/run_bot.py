@@ -29,8 +29,8 @@ ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
 TRADE_MODE    = os.getenv("TRADE_MODE", "paper")
 MAX_POS_USDC  = float(os.getenv("MAX_POSITION_USDC", 10))
 MIN_EDGE      = float(os.getenv("MIN_EDGE", 0.10))
-MIN_CONF      = float(os.getenv("MIN_CONFIDENCE", 0.80))
-MAX_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", 5))
+MIN_CONF      = float(os.getenv("MIN_CONFIDENCE", 0.65))
+MAX_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", 10))
 DAILY_LIMIT   = float(os.getenv("DAILY_LOSS_LIMIT_USDC", 50))
 
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -113,7 +113,10 @@ Required format:
 
 - action: which outcome to bet on, or SKIP if no clear edge
 - estimated_prob: your best estimate of the YES probability
-- confidence: how confident you are in that estimate
+- confidence: your calibrated certainty in your estimate (use the full range):
+    0.50 = total guess, 0.65 = educated guess, 0.75 = reasonably sure,
+    0.85 = strong evidence, 0.95 = near certain
+  Be honest — use high confidence only when you have strong factual basis.
 - reasoning: one concise sentence justifying your call"""
 
 
@@ -308,7 +311,11 @@ def _push_trades():
             ["git", "commit", "-m", f"auto: update trades {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"],
             cwd=base, check=True, capture_output=True
         )
-        subprocess.run(["git", "push", "origin", "master"], cwd=base, check=True, capture_output=True)
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=base, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run(["git", "push", "origin", branch], cwd=base, check=True, capture_output=True)
         print("  [✓] Dashboard updated on Vercel\n")
     except Exception as e:
         print(f"  [!] Auto-push failed (run manually): {e}\n")

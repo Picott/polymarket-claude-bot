@@ -9,8 +9,7 @@ __pycache__/
 venv/
 env/
 
-# Logs (solo el .gitkeep se trackea)
-logs/*.jsonl
+# Logs (trades.jsonl se trackea para Vercel — .heartbeat no)
 logs/.heartbeat
 
 # OS

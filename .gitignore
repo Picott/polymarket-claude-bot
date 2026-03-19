@@ -1,0 +1,18 @@
+# Env — NUNCA subir al repo
+config/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Logs (solo el .gitkeep se trackea)
+logs/*.jsonl
+logs/.heartbeat
+
+# OS
+.DS_Store
+Thumbs.db

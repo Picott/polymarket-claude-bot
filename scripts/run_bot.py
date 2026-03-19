@@ -68,6 +68,84 @@ def load_today_trades() -> list:
     return trades
 
 
+# ── Trade resolution ─────────────────────────────────────────────
+
+def resolve_pending_trades():
+    """Check resolved markets and update result/pnl on executed trades."""
+    if not TRADES_LOG.exists():
+        return
+    lines = TRADES_LOG.read_text().splitlines()
+    new_lines = []
+    updated = False
+
+    for line in lines:
+        if not line.strip():
+            new_lines.append(line)
+            continue
+        try:
+            trade = json.loads(line)
+        except json.JSONDecodeError:
+            new_lines.append(line)
+            continue
+
+        if trade.get("executed") and trade.get("result") is None:
+            resolution = _check_market_resolution(trade)
+            if resolution:
+                trade["result"] = resolution["outcome"]
+                trade["pnl_usdc"] = resolution["pnl"]
+                updated = True
+                print(f"  [✓] Resolved: {trade['question'][:55]} → {resolution['outcome']} (${resolution['pnl']:+.2f})")
+
+        new_lines.append(json.dumps(trade))
+
+    if updated:
+        TRADES_LOG.write_text("\n".join(new_lines) + "\n")
+        print()
+
+
+def _check_market_resolution(trade: dict) -> dict | None:
+    """Query Gamma API for a market. Returns {outcome, pnl} if resolved, else None."""
+    market_id = trade.get("market_id")
+    if not market_id:
+        return None
+    try:
+        resp = requests.get(f"{GAMMA_API}/markets/{market_id}", timeout=10)
+        if resp.status_code != 200:
+            return None
+        m = resp.json()
+
+        if m.get("active", True) and not m.get("closed"):
+            return None  # still open
+
+        prices = m.get("outcomePrices", [])
+        if isinstance(prices, str):
+            prices = json.loads(prices)
+        if not prices or len(prices) < 2:
+            return None
+
+        yes_price = float(prices[0])
+        if yes_price >= 0.99:
+            winner = "YES"
+        elif yes_price <= 0.01:
+            winner = "NO"
+        else:
+            return None  # not fully settled yet
+
+        bet        = trade.get("bet")
+        size       = trade.get("size_usdc", 0)
+        entry_prob = trade.get("market_prob", 0.5)
+
+        if bet == winner:
+            entry_price = entry_prob if bet == "YES" else (1 - entry_prob)
+            pnl = round(size * (1 / entry_price - 1), 2) if entry_price > 0 else 0
+            return {"outcome": "WIN", "pnl": pnl}
+        else:
+            return {"outcome": "LOSS", "pnl": round(-size, 2)}
+
+    except Exception:
+        return None
+
+
 # ── Market fetching ──────────────────────────────────────────────
 
 def fetch_markets(limit: int = 30) -> list:
@@ -170,6 +248,8 @@ def run_once(mode: str):
     ts_start = datetime.utcnow().strftime("%H:%M:%S")
     print(f"\n  [{ts_start}] Scanning markets…  mode={mode.upper()}")
     update_heartbeat()
+
+    resolve_pending_trades()
 
     today_trades    = load_today_trades()
     today_executed  = [t for t in today_trades if t.get("executed")]

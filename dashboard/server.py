@@ -47,11 +47,21 @@ def compute_stats(trades: list[dict]) -> dict:
             "total_deployed_usdc": 0, "avg_edge": 0, "avg_confidence": 0,
             "by_model": {}, "by_bet": {}, "skip_reasons": {},
             "timeline": [], "top_edges": [],
+            "wins": 0, "losses": 0, "pending": 0,
+            "total_pnl": 0, "win_rate": None,
         }
 
     total_deployed = sum(t.get("size_usdc", 0) for t in executed)
     avg_edge = sum(t.get("edge", 0) for t in executed) / len(executed) if executed else 0
     avg_conf = sum(t.get("confidence", 0) for t in executed) / len(executed) if executed else 0
+
+    # P&L tracking
+    wins    = [t for t in executed if t.get("result") == "WIN"]
+    losses  = [t for t in executed if t.get("result") == "LOSS"]
+    pending = [t for t in executed if t.get("result") is None]
+    total_pnl = sum(t.get("pnl_usdc", 0) for t in executed if t.get("result") in ("WIN", "LOSS"))
+    resolved = len(wins) + len(losses)
+    win_rate = round(len(wins) / resolved * 100, 1) if resolved > 0 else None
 
     # By model
     by_model = defaultdict(int)
@@ -104,6 +114,8 @@ def compute_stats(trades: list[dict]) -> dict:
         "size": t.get("size_usdc", 0),
         "model": "Haiku" if "haiku" in t.get("model", "") else "Sonnet",
         "timestamp": t["timestamp"][:16].replace("T", " "),
+        "result": t.get("result"),
+        "pnl": t.get("pnl_usdc"),
     } for t in top_edges]
 
     return {
@@ -118,6 +130,11 @@ def compute_stats(trades: list[dict]) -> dict:
         "skip_reasons": dict(skip_reasons),
         "timeline": timeline,
         "top_edges": top_edges_clean,
+        "wins": len(wins),
+        "losses": len(losses),
+        "pending": len(pending),
+        "total_pnl": round(total_pnl, 2),
+        "win_rate": win_rate,
         "last_updated": datetime.now().strftime("%H:%M:%S"),
         "mode": trades[-1].get("mode", "paper").upper() if trades else "PAPER",
         "heartbeat": _read_heartbeat(),
@@ -259,7 +276,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   /* Main grid */
   .grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 1px;
     background: var(--border);
     border-bottom: 1px solid var(--border);
@@ -287,9 +304,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     line-height: 1;
   }
 
-  .stat-value.green { color: var(--accent); }
-  .stat-value.blue  { color: var(--accent2); }
-  .stat-value.warn  { color: var(--warn); }
+  .stat-value.green  { color: var(--accent); }
+  .stat-value.blue   { color: var(--accent2); }
+  .stat-value.warn   { color: var(--warn); }
+  .stat-value.profit { color: var(--accent); }
+  .stat-value.loss   { color: var(--danger); }
+  .stat-value.neutral{ color: var(--muted); }
+
+  .result-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 2px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    font-family: var(--font-mono);
+  }
+  .result-badge.WIN     { background: rgba(0,229,160,0.15); color: var(--accent); border: 1px solid rgba(0,229,160,0.3); }
+  .result-badge.LOSS    { background: rgba(255,79,106,0.15); color: var(--danger); border: 1px solid rgba(255,79,106,0.3); }
+  .result-badge.PENDING { background: rgba(74,100,120,0.2); color: var(--muted); border: 1px solid var(--dim); }
 
   .stat-sub {
     font-size: 11px;
@@ -507,6 +540,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="stat-value warn" id="kpi-edge">—</div>
     <div class="stat-sub" id="kpi-conf">avg confidence —</div>
   </div>
+  <div class="stat-card">
+    <div class="stat-label">P&amp;L (Paper)</div>
+    <div class="stat-value neutral" id="kpi-pnl">—</div>
+    <div class="stat-sub" id="kpi-winrate">— resolved</div>
+  </div>
 </div>
 
 <!-- Charts + tables -->
@@ -538,10 +576,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <th>Edge</th>
           <th>Size</th>
           <th>Model</th>
+          <th>Result</th>
         </tr>
       </thead>
       <tbody id="top-edges-body">
-        <tr><td colspan="5" class="loading">loading…</td></tr>
+        <tr><td colspan="6" class="loading">loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -638,6 +677,20 @@ function updateStats(s) {
   document.getElementById('kpi-edge').textContent = `${s.avg_edge}%`;
   document.getElementById('kpi-conf').textContent = `avg confidence ${s.avg_confidence}%`;
 
+  // P&L KPI
+  const pnlEl = document.getElementById('kpi-pnl');
+  if (s.wins + s.losses === 0) {
+    pnlEl.textContent = '—';
+    pnlEl.className = 'stat-value neutral';
+    document.getElementById('kpi-winrate').textContent = '0 resolved';
+  } else {
+    const sign = s.total_pnl >= 0 ? '+' : '';
+    pnlEl.textContent = `${sign}$${s.total_pnl.toFixed(2)}`;
+    pnlEl.className = `stat-value ${s.total_pnl >= 0 ? 'profit' : 'loss'}`;
+    const wr = s.win_rate !== null ? `${s.win_rate}% win rate` : '';
+    document.getElementById('kpi-winrate').textContent = `${s.wins}W ${s.losses}L ${s.pending}P  ${wr}`;
+  }
+
   // Mode pill
   const pill = document.getElementById('mode-pill');
   pill.className = `pill ${s.mode.toLowerCase()}`;
@@ -665,9 +718,12 @@ function updateStats(s) {
   // Top edges table
   const tbody = document.getElementById('top-edges-body');
   if (s.top_edges.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" style="color:#4a6478;font-family:monospace;padding:16px 0">No executed trades yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="color:#4a6478;font-family:monospace;padding:16px 0">No executed trades yet</td></tr>';
   } else {
-    tbody.innerHTML = s.top_edges.map(t => `
+    tbody.innerHTML = s.top_edges.map(t => {
+      const resultLabel = t.result || 'PENDING';
+      const pnlStr = t.pnl != null ? ` ${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}` : '';
+      return `
       <tr>
         <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">${t.question}</td>
         <td><span class="bet-badge ${t.bet}">${t.bet}</span></td>
@@ -679,7 +735,9 @@ function updateStats(s) {
         </td>
         <td style="font-family:monospace;font-size:11px;color:#c8dde8">$${t.size}</td>
         <td><span class="model-tag">${t.model}</span></td>
-      </tr>`).join('');
+        <td><span class="result-badge ${resultLabel}">${resultLabel}${pnlStr}</span></td>
+      </tr>`;
+    }).join('');
   }
 
   // Skip reasons

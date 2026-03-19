@@ -117,6 +117,16 @@ Required format:
 - reasoning: one concise sentence justifying your call"""
 
 
+def _parse_json_response(text: str) -> dict:
+    """Strip markdown fences and parse JSON from Claude's response."""
+    text = text.strip()
+    # Remove ```json ... ``` or ``` ... ``` wrappers
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    return json.loads(text.strip())
+
+
 def evaluate_market(question: str, market_prob: float, model: str) -> dict | None:
     prompt = (
         f"Market: {question}\n"
@@ -130,7 +140,14 @@ def evaluate_market(question: str, market_prob: float, model: str) -> dict | Non
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        return json.loads(msg.content[0].text)
+        raw = msg.content[0].text if msg.content else ""
+        if not raw.strip():
+            print(f"    [!] Claude returned empty response ({model})")
+            return None
+        return _parse_json_response(raw)
+    except json.JSONDecodeError as e:
+        print(f"    [!] Claude JSON parse error ({model}): {e}")
+        return None
     except Exception as e:
         print(f"    [!] Claude error ({model}): {e}")
         return None

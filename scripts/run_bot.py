@@ -311,7 +311,11 @@ def _push_trades():
             ["git", "commit", "-m", f"auto: update trades {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"],
             cwd=base, check=True, capture_output=True
         )
-        subprocess.run(["git", "push", "origin", "master"], cwd=base, check=True, capture_output=True)
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=base, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run(["git", "push", "origin", branch], cwd=base, check=True, capture_output=True)
         print("  [✓] Dashboard updated on Vercel\n")
     except Exception as e:
         print(f"  [!] Auto-push failed (run manually): {e}\n")

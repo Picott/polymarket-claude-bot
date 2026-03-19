@@ -13,10 +13,11 @@ from collections import defaultdict
 from flask import Flask, jsonify, render_template_string
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path="config/.env")
+ROOT = Path(__file__).parent.parent
+load_dotenv(dotenv_path=ROOT / "config" / ".env")
 
 app = Flask(__name__)
-TRADES_LOG = Path("logs/trades.jsonl")
+TRADES_LOG = ROOT / "logs" / "trades.jsonl"
 
 
 # ── Data loading ───────────────────────────────────────────
@@ -125,7 +126,7 @@ def compute_stats(trades: list[dict]) -> dict:
 
 def _read_heartbeat() -> str:
     try:
-        return Path("logs/.heartbeat").read_text().strip()[:16].replace("T", " ")
+        return (ROOT / "logs" / ".heartbeat").read_text().strip()[:16].replace("T", " ")
     except FileNotFoundError:
         return "not running"
 
@@ -751,4 +752,4 @@ if __name__ == "__main__":
     import sys
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
     print(f"\n  Dashboard running at: http://localhost:{port}\n")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="127.0.0.1", port=port, debug=False)

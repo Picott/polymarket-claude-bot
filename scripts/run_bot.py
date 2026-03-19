@@ -298,15 +298,19 @@ def run_once(mode: str):
     _push_trades()
 
 
+VERCEL_DEPLOY_HOOK = "https://api.vercel.com/v1/integrations/deploy/prj_b9wSsRHEMI91cYOtpAbhLeLRhfqd/rTBmFs8rLw"
+
+
 def _push_trades():
     """Auto-commit and push trades.jsonl so Vercel dashboard updates."""
-    import subprocess
+    import subprocess, urllib.request
     try:
         base = str(ROOT)
         subprocess.run(["git", "add", "logs/trades.jsonl"], cwd=base, check=True, capture_output=True)
         result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=base, capture_output=True)
         if result.returncode == 0:
-            return  # nothing new to commit
+            _trigger_vercel_deploy()
+            return  # nothing new to commit, but still trigger redeploy
         subprocess.run(
             ["git", "commit", "-m", f"auto: update trades {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"],
             cwd=base, check=True, capture_output=True
@@ -316,9 +320,20 @@ def _push_trades():
             cwd=base, check=True, capture_output=True, text=True
         ).stdout.strip()
         subprocess.run(["git", "push", "origin", branch], cwd=base, check=True, capture_output=True)
+        _trigger_vercel_deploy()
         print("  [✓] Dashboard updated on Vercel\n")
     except Exception as e:
         print(f"  [!] Auto-push failed (run manually): {e}\n")
+
+
+def _trigger_vercel_deploy():
+    """Call Vercel deploy hook to trigger a redeploy."""
+    import urllib.request
+    try:
+        urllib.request.urlopen(urllib.request.Request(VERCEL_DEPLOY_HOOK, method="POST"), timeout=10)
+        print("  [✓] Vercel redeploy triggered\n")
+    except Exception as e:
+        print(f"  [!] Vercel deploy hook failed: {e}\n")
 
 
 # ── Entry point ──────────────────────────────────────────────────

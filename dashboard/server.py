@@ -44,7 +44,7 @@ def compute_stats(trades: list[dict]) -> dict:
     if not trades:
         return {
             "total_scanned": 0, "executed": 0, "skipped": 0,
-            "total_deployed_usdc": 0, "avg_edge": 0, "avg_confidence": 0,
+            "total_deployed_usdc": 0, "avg_ev": 0, "avg_confidence": 0,
             "by_model": {}, "by_bet": {}, "skip_reasons": {},
             "timeline": [], "top_edges": [],
             "wins": 0, "losses": 0, "pending": 0,
@@ -52,7 +52,7 @@ def compute_stats(trades: list[dict]) -> dict:
         }
 
     total_deployed = sum(t.get("size_usdc", 0) for t in executed)
-    avg_edge = sum(t.get("edge", 0) for t in executed) / len(executed) if executed else 0
+    avg_ev   = sum(t.get("ev_per_dollar", 0) for t in executed) / len(executed) if executed else 0
     avg_conf = sum(t.get("confidence", 0) for t in executed) / len(executed) if executed else 0
 
     # P&L tracking
@@ -80,10 +80,10 @@ def compute_stats(trades: list[dict]) -> dict:
     for t in skipped:
         reason = t.get("skip_reason", "unknown")
         # Shorten reason to category
-        if "Confidence" in reason:
+        if "Confidence" in reason or "confidence" in reason:
             skip_reasons["Low confidence"] += 1
-        elif "Edge" in reason:
-            skip_reasons["Low edge"] += 1
+        elif "EV" in reason or "Edge" in reason:
+            skip_reasons["Low EV"] += 1
         elif "SKIP" in reason:
             skip_reasons["Claude SKIP"] += 1
         elif "Daily loss" in reason:
@@ -104,12 +104,12 @@ def compute_stats(trades: list[dict]) -> dict:
         cumulative += hour_buckets[hour]
         timeline.append({"hour": hour.replace("T", " "), "cumulative": round(cumulative, 2), "deployed": round(hour_buckets[hour], 2)})
 
-    # Top edge opportunities
-    top_edges = sorted(executed, key=lambda t: t.get("edge", 0), reverse=True)[:5]
+    # Top EV opportunities
+    top_edges = sorted(executed, key=lambda t: t.get("ev_per_dollar", 0), reverse=True)[:5]
     top_edges_clean = [{
         "question": t["question"][:70] + ("…" if len(t["question"]) > 70 else ""),
         "bet": t["bet"],
-        "edge": round(t["edge"] * 100, 1),
+        "ev": round(t.get("ev_per_dollar", 0) * 100, 1),
         "confidence": round(t["confidence"] * 100, 0),
         "size": t.get("size_usdc", 0),
         "model": "Haiku" if "haiku" in t.get("model", "") else "Sonnet",
@@ -123,7 +123,7 @@ def compute_stats(trades: list[dict]) -> dict:
         "executed": len(executed),
         "skipped": len(skipped),
         "total_deployed_usdc": round(total_deployed, 2),
-        "avg_edge": round(avg_edge * 100, 1),
+        "avg_ev": round(avg_ev * 100, 1),
         "avg_confidence": round(avg_conf * 100, 1),
         "by_model": dict(by_model),
         "by_bet": dict(by_bet),
@@ -536,7 +536,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="stat-sub" id="kpi-deployed-sub">paper positions</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Avg Edge</div>
+    <div class="stat-label">Avg EV / Dollar</div>
     <div class="stat-value warn" id="kpi-edge">—</div>
     <div class="stat-sub" id="kpi-conf">avg confidence —</div>
   </div>
@@ -573,7 +573,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <tr>
           <th>Market</th>
           <th>Bet</th>
-          <th>Edge</th>
+          <th>EV/dollar</th>
           <th>Size</th>
           <th>Model</th>
           <th>Result</th>
@@ -674,7 +674,7 @@ function updateStats(s) {
   document.getElementById('kpi-exec-rate').textContent = s.total_scanned > 0 ? `${Math.round(s.executed/s.total_scanned*100)}% execution rate` : '—';
   document.getElementById('kpi-deployed').textContent = `$${s.total_deployed_usdc}`;
   document.getElementById('kpi-deployed-sub').textContent = `${s.mode} positions`;
-  document.getElementById('kpi-edge').textContent = `${s.avg_edge}%`;
+  document.getElementById('kpi-edge').textContent = `${s.avg_ev}¢`;
   document.getElementById('kpi-conf').textContent = `avg confidence ${s.avg_confidence}%`;
 
   // P&L KPI
@@ -729,8 +729,8 @@ function updateStats(s) {
         <td><span class="bet-badge ${t.bet}">${t.bet}</span></td>
         <td>
           <div class="edge-bar-wrap">
-            <div class="edge-bar" style="width:${Math.min(t.edge*3,80)}px"></div>
-            <span class="edge-num">${t.edge}%</span>
+            <div class="edge-bar" style="width:${Math.min(t.ev*3,80)}px"></div>
+            <span class="edge-num">${t.ev}¢</span>
           </div>
         </td>
         <td style="font-family:monospace;font-size:11px;color:#c8dde8">$${t.size}</td>
@@ -770,7 +770,7 @@ function updateFeed(trades) {
   feed.innerHTML = recent.map(t => {
     const executed = t.executed;
     const ts = t.timestamp.slice(0,16).replace('T',' ');
-    const edge = t.edge > 0 ? `+${(t.edge*100).toFixed(1)}%` : '—';
+    const edge = t.ev_per_dollar > 0 ? `+${(t.ev_per_dollar*100).toFixed(1)}¢` : '—';
     const size = executed ? `$${t.size_usdc}` : '—';
     return `
       <div class="trade-row ${executed ? '' : 'skipped'}">

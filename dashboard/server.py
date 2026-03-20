@@ -44,14 +44,24 @@ def compute_stats(trades: list[dict]) -> dict:
     if not trades:
         return {
             "total_scanned": 0, "executed": 0, "skipped": 0,
-            "total_deployed_usdc": 0, "avg_edge": 0, "avg_confidence": 0,
+            "total_deployed_usdc": 0, "avg_ev": 0, "avg_confidence": 0,
             "by_model": {}, "by_bet": {}, "skip_reasons": {},
             "timeline": [], "top_edges": [],
+            "wins": 0, "losses": 0, "pending": 0,
+            "total_pnl": 0, "win_rate": None,
         }
 
     total_deployed = sum(t.get("size_usdc", 0) for t in executed)
-    avg_edge = sum(t.get("edge", 0) for t in executed) / len(executed) if executed else 0
+    avg_ev   = sum(t.get("ev_per_dollar", 0) for t in executed) / len(executed) if executed else 0
     avg_conf = sum(t.get("confidence", 0) for t in executed) / len(executed) if executed else 0
+
+    # P&L tracking
+    wins    = [t for t in executed if t.get("result") == "WIN"]
+    losses  = [t for t in executed if t.get("result") == "LOSS"]
+    pending = [t for t in executed if t.get("result") is None]
+    total_pnl = sum(t.get("pnl_usdc", 0) for t in executed if t.get("result") in ("WIN", "LOSS"))
+    resolved = len(wins) + len(losses)
+    win_rate = round(len(wins) / resolved * 100, 1) if resolved > 0 else None
 
     # By model
     by_model = defaultdict(int)
@@ -70,10 +80,10 @@ def compute_stats(trades: list[dict]) -> dict:
     for t in skipped:
         reason = t.get("skip_reason", "unknown")
         # Shorten reason to category
-        if "Confidence" in reason:
+        if "Confidence" in reason or "confidence" in reason:
             skip_reasons["Low confidence"] += 1
-        elif "Edge" in reason:
-            skip_reasons["Low edge"] += 1
+        elif "EV" in reason or "Edge" in reason:
+            skip_reasons["Low EV"] += 1
         elif "SKIP" in reason:
             skip_reasons["Claude SKIP"] += 1
         elif "Daily loss" in reason:
@@ -94,16 +104,18 @@ def compute_stats(trades: list[dict]) -> dict:
         cumulative += hour_buckets[hour]
         timeline.append({"hour": hour.replace("T", " "), "cumulative": round(cumulative, 2), "deployed": round(hour_buckets[hour], 2)})
 
-    # Top edge opportunities
-    top_edges = sorted(executed, key=lambda t: t.get("edge", 0), reverse=True)[:5]
+    # Top EV opportunities
+    top_edges = sorted(executed, key=lambda t: t.get("ev_per_dollar", 0), reverse=True)[:5]
     top_edges_clean = [{
         "question": t["question"][:70] + ("…" if len(t["question"]) > 70 else ""),
         "bet": t["bet"],
-        "edge": round(t["edge"] * 100, 1),
+        "ev": round(t.get("ev_per_dollar", 0) * 100, 1),
         "confidence": round(t["confidence"] * 100, 0),
         "size": t.get("size_usdc", 0),
         "model": "Haiku" if "haiku" in t.get("model", "") else "Sonnet",
         "timestamp": t["timestamp"][:16].replace("T", " "),
+        "result": t.get("result"),
+        "pnl": t.get("pnl_usdc"),
     } for t in top_edges]
 
     return {
@@ -111,13 +123,18 @@ def compute_stats(trades: list[dict]) -> dict:
         "executed": len(executed),
         "skipped": len(skipped),
         "total_deployed_usdc": round(total_deployed, 2),
-        "avg_edge": round(avg_edge * 100, 1),
+        "avg_ev": round(avg_ev * 100, 1),
         "avg_confidence": round(avg_conf * 100, 1),
         "by_model": dict(by_model),
         "by_bet": dict(by_bet),
         "skip_reasons": dict(skip_reasons),
         "timeline": timeline,
         "top_edges": top_edges_clean,
+        "wins": len(wins),
+        "losses": len(losses),
+        "pending": len(pending),
+        "total_pnl": round(total_pnl, 2),
+        "win_rate": win_rate,
         "last_updated": datetime.now().strftime("%H:%M:%S"),
         "mode": trades[-1].get("mode", "paper").upper() if trades else "PAPER",
         "heartbeat": _read_heartbeat(),
@@ -259,7 +276,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   /* Main grid */
   .grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 1px;
     background: var(--border);
     border-bottom: 1px solid var(--border);
@@ -287,9 +304,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     line-height: 1;
   }
 
-  .stat-value.green { color: var(--accent); }
-  .stat-value.blue  { color: var(--accent2); }
-  .stat-value.warn  { color: var(--warn); }
+  .stat-value.green  { color: var(--accent); }
+  .stat-value.blue   { color: var(--accent2); }
+  .stat-value.warn   { color: var(--warn); }
+  .stat-value.profit { color: var(--accent); }
+  .stat-value.loss   { color: var(--danger); }
+  .stat-value.neutral{ color: var(--muted); }
+
+  .result-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 2px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    font-family: var(--font-mono);
+  }
+  .result-badge.WIN     { background: rgba(0,229,160,0.15); color: var(--accent); border: 1px solid rgba(0,229,160,0.3); }
+  .result-badge.LOSS    { background: rgba(255,79,106,0.15); color: var(--danger); border: 1px solid rgba(255,79,106,0.3); }
+  .result-badge.PENDING { background: rgba(74,100,120,0.2); color: var(--muted); border: 1px solid var(--dim); }
 
   .stat-sub {
     font-size: 11px;
@@ -503,9 +536,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="stat-sub" id="kpi-deployed-sub">paper positions</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Avg Edge</div>
+    <div class="stat-label">Avg EV / Dollar</div>
     <div class="stat-value warn" id="kpi-edge">—</div>
     <div class="stat-sub" id="kpi-conf">avg confidence —</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">P&amp;L (Paper)</div>
+    <div class="stat-value neutral" id="kpi-pnl">—</div>
+    <div class="stat-sub" id="kpi-winrate">— resolved</div>
   </div>
 </div>
 
@@ -535,13 +573,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <tr>
           <th>Market</th>
           <th>Bet</th>
-          <th>Edge</th>
+          <th>EV/dollar</th>
           <th>Size</th>
           <th>Model</th>
+          <th>Result</th>
         </tr>
       </thead>
       <tbody id="top-edges-body">
-        <tr><td colspan="5" class="loading">loading…</td></tr>
+        <tr><td colspan="6" class="loading">loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -635,8 +674,22 @@ function updateStats(s) {
   document.getElementById('kpi-exec-rate').textContent = s.total_scanned > 0 ? `${Math.round(s.executed/s.total_scanned*100)}% execution rate` : '—';
   document.getElementById('kpi-deployed').textContent = `$${s.total_deployed_usdc}`;
   document.getElementById('kpi-deployed-sub').textContent = `${s.mode} positions`;
-  document.getElementById('kpi-edge').textContent = `${s.avg_edge}%`;
+  document.getElementById('kpi-edge').textContent = `${s.avg_ev}¢`;
   document.getElementById('kpi-conf').textContent = `avg confidence ${s.avg_confidence}%`;
+
+  // P&L KPI
+  const pnlEl = document.getElementById('kpi-pnl');
+  if (s.wins + s.losses === 0) {
+    pnlEl.textContent = '—';
+    pnlEl.className = 'stat-value neutral';
+    document.getElementById('kpi-winrate').textContent = '0 resolved';
+  } else {
+    const sign = s.total_pnl >= 0 ? '+' : '';
+    pnlEl.textContent = `${sign}$${s.total_pnl.toFixed(2)}`;
+    pnlEl.className = `stat-value ${s.total_pnl >= 0 ? 'profit' : 'loss'}`;
+    const wr = s.win_rate !== null ? `${s.win_rate}% win rate` : '';
+    document.getElementById('kpi-winrate').textContent = `${s.wins}W ${s.losses}L ${s.pending}P  ${wr}`;
+  }
 
   // Mode pill
   const pill = document.getElementById('mode-pill');
@@ -665,21 +718,26 @@ function updateStats(s) {
   // Top edges table
   const tbody = document.getElementById('top-edges-body');
   if (s.top_edges.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" style="color:#4a6478;font-family:monospace;padding:16px 0">No executed trades yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="color:#4a6478;font-family:monospace;padding:16px 0">No executed trades yet</td></tr>';
   } else {
-    tbody.innerHTML = s.top_edges.map(t => `
+    tbody.innerHTML = s.top_edges.map(t => {
+      const resultLabel = t.result || 'PENDING';
+      const pnlStr = t.pnl != null ? ` ${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}` : '';
+      return `
       <tr>
         <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">${t.question}</td>
         <td><span class="bet-badge ${t.bet}">${t.bet}</span></td>
         <td>
           <div class="edge-bar-wrap">
-            <div class="edge-bar" style="width:${Math.min(t.edge*3,80)}px"></div>
-            <span class="edge-num">${t.edge}%</span>
+            <div class="edge-bar" style="width:${Math.min(t.ev*3,80)}px"></div>
+            <span class="edge-num">${t.ev}¢</span>
           </div>
         </td>
         <td style="font-family:monospace;font-size:11px;color:#c8dde8">$${t.size}</td>
         <td><span class="model-tag">${t.model}</span></td>
-      </tr>`).join('');
+        <td><span class="result-badge ${resultLabel}">${resultLabel}${pnlStr}</span></td>
+      </tr>`;
+    }).join('');
   }
 
   // Skip reasons
@@ -712,7 +770,7 @@ function updateFeed(trades) {
   feed.innerHTML = recent.map(t => {
     const executed = t.executed;
     const ts = t.timestamp.slice(0,16).replace('T',' ');
-    const edge = t.edge > 0 ? `+${(t.edge*100).toFixed(1)}%` : '—';
+    const edge = t.ev_per_dollar > 0 ? `+${(t.ev_per_dollar*100).toFixed(1)}¢` : '—';
     const size = executed ? `$${t.size_usdc}` : '—';
     return `
       <div class="trade-row ${executed ? '' : 'skipped'}">

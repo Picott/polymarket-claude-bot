@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -28,10 +29,12 @@ HEARTBEAT     = ROOT / "logs" / ".heartbeat"
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
 TRADE_MODE    = os.getenv("TRADE_MODE", "paper")
 MAX_POS_USDC  = float(os.getenv("MAX_POSITION_USDC", 10))
-MIN_EDGE      = float(os.getenv("MIN_EDGE", 0.10))
+MIN_EV        = float(os.getenv("MIN_EV", 0.05))       # min EV per dollar (5¢)
 MIN_CONF      = float(os.getenv("MIN_CONFIDENCE", 0.65))
 MAX_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", 10))
 DAILY_LIMIT   = float(os.getenv("DAILY_LOSS_LIMIT_USDC", 50))
+BANKROLL      = float(os.getenv("BANKROLL_USDC", 1000))
+KELLY_FRAC    = float(os.getenv("KELLY_FRACTION", 0.25))  # quarter Kelly
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 HAIKU     = "claude-haiku-4-5-20251001"
@@ -93,6 +96,7 @@ def resolve_pending_trades():
             if resolution:
                 trade["result"] = resolution["outcome"]
                 trade["pnl_usdc"] = resolution["pnl"]
+                trade["log_return"] = resolution.get("log_return", 0)
                 updated = True
                 print(f"  [✓] Resolved: {trade['question'][:55]} → {resolution['outcome']} (${resolution['pnl']:+.2f})")
 
@@ -138,9 +142,13 @@ def _check_market_resolution(trade: dict) -> dict | None:
         if bet == winner:
             entry_price = entry_prob if bet == "YES" else (1 - entry_prob)
             pnl = round(size * (1 / entry_price - 1), 2) if entry_price > 0 else 0
-            return {"outcome": "WIN", "pnl": pnl}
+            # Log return: ln(final_value / initial_value) — correct for compounding
+            log_ret = round(math.log(1 + pnl / size), 4) if size > 0 else 0
+            return {"outcome": "WIN", "pnl": pnl, "log_return": log_ret}
         else:
-            return {"outcome": "LOSS", "pnl": round(-size, 2)}
+            # Full loss: log return = ln(0) is -inf, so we use a floor of -4.6 (≈ 99% loss)
+            log_ret = round(math.log(0.01), 4)  # -4.6052
+            return {"outcome": "LOSS", "pnl": round(-size, 2), "log_return": log_ret}
 
     except Exception:
         return None
@@ -234,12 +242,26 @@ def evaluate_market(question: str, market_prob: float, model: str) -> dict | Non
         return None
 
 
-# ── Sizing ───────────────────────────────────────────────────────
+# ── Math: EV + Kelly ─────────────────────────────────────────────
 
-def calc_size(edge: float, confidence: float) -> float:
-    """Fractional Kelly sizing capped at MAX_POS_USDC."""
-    size = MAX_POS_USDC * edge * confidence
-    return round(min(size, MAX_POS_USDC), 2)
+def calc_ev(true_prob: float, market_price: float) -> float:
+    """Expected value per dollar risked.
+    EV = p * (1 - price) - (1 - p) * price
+    Positive = edge in our favour."""
+    return true_prob * (1 - market_price) - (1 - true_prob) * market_price
+
+
+def calc_kelly(true_prob: float, market_price: float) -> float:
+    """Quarter-Kelly fraction of bankroll, capped to MAX_POS_USDC.
+    b = payout ratio = (1 - price) / price
+    f* = (p*b - q) / b  →  apply KELLY_FRAC for safety."""
+    if market_price <= 0 or market_price >= 1:
+        return 0.0
+    b = (1 - market_price) / market_price
+    q = 1 - true_prob
+    f_full = (true_prob * b - q) / b
+    f_safe = max(f_full, 0.0) * KELLY_FRAC
+    return round(min(BANKROLL * f_safe, MAX_POS_USDC), 2)
 
 
 # ── Core scan ────────────────────────────────────────────────────
@@ -281,14 +303,16 @@ def run_once(mode: str):
         if not haiku_eval or haiku_eval.get("action") == "SKIP":
             reason = "Claude SKIP" if haiku_eval else "API error"
             ep     = haiku_eval.get("estimated_prob", market_prob) if haiku_eval else market_prob
+            ep_skip = haiku_eval.get("estimated_prob", market_prob) if haiku_eval else market_prob
             log_trade({
                 "timestamp": datetime.utcnow().isoformat(),
                 "mode": mode, "executed": False,
                 "question": question, "market_id": market_id,
                 "bet": haiku_eval.get("action", "SKIP") if haiku_eval else "SKIP",
                 "confidence": haiku_eval.get("confidence", 0) if haiku_eval else 0,
-                "estimated_prob": ep, "market_prob": market_prob,
-                "edge": abs(ep - market_prob),
+                "estimated_prob": ep_skip, "market_prob": market_prob,
+                "ev_per_dollar": round(calc_ev(ep_skip, market_prob), 4),
+                "kelly_fraction": 0,
                 "size_usdc": 0,
                 "reasoning": haiku_eval.get("reasoning", "") if haiku_eval else "",
                 "model": HAIKU, "skip_reason": reason, "result": None,
@@ -296,18 +320,18 @@ def run_once(mode: str):
             print(f"    → SKIP ({reason})\n")
             continue
 
-        est_prob = haiku_eval.get("estimated_prob", market_prob)
-        edge     = abs(est_prob - market_prob)
-        conf     = haiku_eval.get("confidence", 0)
-        action   = haiku_eval.get("action")
+        est_prob  = haiku_eval.get("estimated_prob", market_prob)
+        ev        = calc_ev(est_prob, market_prob)
+        conf      = haiku_eval.get("confidence", 0)
+        action    = haiku_eval.get("action")
         reasoning = haiku_eval.get("reasoning", "")
 
-        print(f"    Haiku: {action} | est={est_prob:.1%} | edge={edge:.1%} | conf={conf:.0%}")
+        print(f"    Haiku: {action} | est={est_prob:.1%} | EV={ev:+.2f} | conf={conf:.0%}")
 
         # ── Threshold checks ─────────────────────────────────────
         skip_reason = ""
-        if edge < MIN_EDGE:
-            skip_reason = f"Insufficient edge ({edge:.1%} < {MIN_EDGE:.0%})"
+        if ev < MIN_EV:
+            skip_reason = f"Insufficient EV ({ev:.2f} < {MIN_EV:.2f})"
         elif conf < MIN_CONF:
             skip_reason = f"Low confidence ({conf:.0%} < {MIN_CONF:.0%})"
         elif open_positions >= MAX_POSITIONS:
@@ -322,7 +346,8 @@ def run_once(mode: str):
                 "question": question, "market_id": market_id,
                 "bet": action, "confidence": conf,
                 "estimated_prob": est_prob, "market_prob": market_prob,
-                "edge": edge, "size_usdc": 0, "reasoning": reasoning,
+                "ev_per_dollar": round(ev, 4), "kelly_fraction": 0,
+                "size_usdc": 0, "reasoning": reasoning,
                 "model": HAIKU, "skip_reason": skip_reason, "result": None,
             })
             print(f"    → SKIP: {skip_reason}\n")
@@ -340,7 +365,8 @@ def run_once(mode: str):
                 "question": question, "market_id": market_id,
                 "bet": action, "confidence": conf,
                 "estimated_prob": est_prob, "market_prob": market_prob,
-                "edge": edge, "size_usdc": 0,
+                "ev_per_dollar": round(ev, 4), "kelly_fraction": 0,
+                "size_usdc": 0,
                 "reasoning": sonnet_eval.get("reasoning", reasoning),
                 "model": SONNET, "skip_reason": "Sonnet downgrade: SKIP", "result": None,
             })
@@ -348,15 +374,16 @@ def run_once(mode: str):
             continue
         elif sonnet_eval:
             est_prob  = sonnet_eval.get("estimated_prob", est_prob)
-            edge      = abs(est_prob - market_prob)
+            ev        = calc_ev(est_prob, market_prob)
             conf      = sonnet_eval.get("confidence", conf)
             action    = sonnet_eval.get("action", action)
             reasoning = sonnet_eval.get("reasoning", reasoning)
         else:
             final_model = HAIKU  # Sonnet failed, fall back to Haiku decision
 
-        size = calc_size(edge, conf)
-        print(f"    → EXECUTE {action} | size=${size} | edge={edge:.1%} | conf={conf:.0%}")
+        size         = calc_kelly(est_prob, market_prob)
+        kelly_f      = round(size / BANKROLL, 4) if BANKROLL > 0 else 0
+        print(f"    → EXECUTE {action} | size=${size} | EV={ev:+.2f} | Kelly={kelly_f:.1%} | conf={conf:.0%}")
 
         log_trade({
             "timestamp": datetime.utcnow().isoformat(),
@@ -364,7 +391,8 @@ def run_once(mode: str):
             "question": question, "market_id": market_id,
             "bet": action, "confidence": conf,
             "estimated_prob": est_prob, "market_prob": market_prob,
-            "edge": edge, "size_usdc": size, "reasoning": reasoning,
+            "ev_per_dollar": round(ev, 4), "kelly_fraction": kelly_f,
+            "size_usdc": size, "reasoning": reasoning,
             "model": final_model, "skip_reason": "", "result": None,
         })
 
